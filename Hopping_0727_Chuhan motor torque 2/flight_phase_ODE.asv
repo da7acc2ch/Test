@@ -1,0 +1,75 @@
+function dq = flight_phase_ODE(t,q,g,l0,T,p_desired,kr,klp,kpos,h_desired,params,integral_e,dt)
+robot_pos=q(1:3); robot_vel=q(4:6); leg_tilt=q(7:8);
+robot_orient = [q(10);q(11);q(12)];
+robot_angvel = [q(13);q(14);q(15)];
+v_desired = kpos*(p_desired-robot_pos);
+if norm(v_desired)>params.velocityLim
+    v_desired = v_desired/norm(v_desired)*params.velocityLim;
+end
+step = T/2*[robot_vel(1);robot_vel(2);0]-kr*[v_desired(1);v_desired(2);0];
+norm_step = norm(step);
+    if norm_step > l0
+        norm_step = l0;
+    end
+step(3) = -sqrt(l0^2-norm_step^2);
+desired_leg_tilt = [asin(step(1)/l0); asin(step(2)/l0)];
+    % 然后，用一个PD控制器计算驱动腿部摆动的“虚拟力”
+    % 这模拟了电机为了让腿摆到正确位置而施加的力
+     leg_control_force_2D = klp * (desired_leg_tilt - leg_tilt);
+    
+    leg_control_force = [leg_control_force_2D(1); leg_control_force_2D(2); 0];
+    
+    leg_tilt_vel = leg_control_force_2D; % 腿部角度的变化率由这个控制力驱动
+% leg_tilt_vel = [klp*(asin(robot_vel(1)*T/2/l0-kr*(v_desired(1)-robot_vel(1)))-leg_tilt(1)); ...
+%     klp*(asin(robot_vel(2)*T/2/l0-kr*(v_desired(2)-robot_vel(2)))-leg_tilt(2))];
+if params.propeller_switch == 1
+    % p_desired = q(1:3);
+    q_full = zeros(16,1);
+    q_full(1:8) = q(1:8); q_full(9) = 0;
+    q_full(10:12) = q(10:12); q_full(13:15) = q(13:15); q_full(16) = q(9);
+    [U, ~] = tricopter_pid_controller(q_full, p_desired, h_desired, params, integral_e, dt);
+    motor_thrusts = tricopter_mixer(U, params);
+    else
+        motor_thrusts = [0; 0; 0];
+    end
+    l_m=params.l; k_t=params.k_t;
+    T1=motor_thrusts(1); T2=motor_thrusts(2); T3=motor_thrusts(3);
+    tau_prop = [(T2 - T3) * l_m * cosd(30); ...
+        (-T1 + (T2 + T3) * sind(30)) * l_m; ...
+        k_t * (T2 - T1 - T3)];
+     relative_foot_body = [sin(leg_tilt(1)); sin(leg_tilt(2)); -cos(leg_tilt(1))*cos(leg_tilt(2))] * l0;
+  tau_legs_reaction = cross(leg_control_force, relative_foot_body); % ✅ 现在这里的两个向量都是3x1了
+
+
+    
+    
+    
+    
+    dq = zeros([15,1]);
+    dq(1) = robot_vel(1);
+    dq(2) = robot_vel(2);
+    dq(3) = robot_vel(3);
+    R_bw = eul2rotm(robot_orient','ZYX');
+    prop_force_world = R_bw * [0; 0; sum(motor_thrusts)];
+    % disp('^^^');
+    % disp(prop_force_world);
+    % disp('---');
+    % disp([0; 0; sum(motor_thrusts)]);
+
+
+
+    dq(4:6) = [0;0;-g] + prop_force_world/params.m;
+    dq(7:8) = leg_tilt_vel;
+    phi = robot_orient(1);
+    theta = robot_orient(2);
+    W_inv = [1, sin(phi)*tan(theta), cos(phi)*tan(theta);
+        0, cos(phi),           -sin(phi);
+        0, sin(phi)/cos(theta), cos(phi)/cos(theta)];
+    dq(10:12) = W_inv * robot_angvel;
+    I = params.I_matrix;
+    omega = robot_angvel;
+    tau_total = tau_prop + tau_legs_reaction; 
+    dq(13:15) = I \ (tau_total - cross(omega, I * omega));
+    dq(9) = 0;
+
+end

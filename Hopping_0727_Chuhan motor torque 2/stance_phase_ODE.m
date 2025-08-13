@@ -1,0 +1,105 @@
+function dq = stance_phase_ODE(t,q,m,g,k_spring,l0,p_desired,h_desired,ke,kf,bf,kpos,kp,kd,params,integral_e,dt)
+robot_pos = q(1:3);
+robot_vel = q(4:6);
+foot_pos = q(7:9);
+robot_orient = q(10:12);
+robot_angvel = q(13:15);
+v_desired = kpos*(p_desired-robot_pos);
+if norm(v_desired)>params.velocityLim
+    v_desired = v_desired/norm(v_desired)*params.velocityLim;
+end
+l = norm(robot_pos-foot_pos);
+unit_spring = (robot_pos-foot_pos)/l;
+e_desired = 1/2*params.m*dot(v_desired,v_desired) + params.m*g*(h_desired);
+e = 1/2*params.m*(dot(robot_vel,robot_vel)) + 1/2*k_spring*(l-l0)^2+params.m*g*robot_pos(3);
+f_e = ke*(e_desired-e);
+spring_force =-k_spring*(l-l0);
+if robot_vel(3)>0, spring_force = spring_force+f_e; end
+spring_force = spring_force*unit_spring;
+
+% % % disp('+++');
+% % % disp(robot_orient);
+% % % disp('...');
+% % % disp(robot_angvel);
+
+
+hip_torque = kp*robot_orient+kd*robot_angvel;
+hip_torque = hip_torque-dot(hip_torque,unit_spring)*unit_spring;
+% hip_torque = kp*robot_orient+kd*robot_angvel;
+side_force = cross(hip_torque,(robot_pos-foot_pos))/dot((robot_pos-foot_pos),(robot_pos-foot_pos));
+
+foot_force = spring_force+side_force;
+% foot_force = spring_force;
+if params.propeller_switch == 1
+    q_full = zeros(16,1);
+    q_full(1:8) = q(1:8); q_full(9) = 0;
+    q_full(10:12) = q(10:12); q_full(13:15) = q(13:15); q_full(16) = q(9);
+    [U, ~] = tricopter_pid_controller(q_full, p_desired, h_desired, params, integral_e, dt);
+    motor_thrusts = tricopter_mixer(U, params);
+else
+    motor_thrusts = [0; 0; 0];
+end
+
+relative_foot_body = robot_pos - foot_pos;
+% % % disp('+++');
+% % % disp(foot_force_body);
+% % % disp('...');
+% % % disp(foot_force);
+
+% % test
+D = params.D; d = params.d; r = params.r;
+J_inv = inverse_jacobian(relative_foot_body, D, d, r);
+joint_torques = inv(J_inv') * foot_force;
+% % test
+% joint_torques = [0,0,0];
+max_torque = 5.0;
+joint_torques = max(-max_torque, min(max_torque, joint_torques));
+axis1 = [1; 0; 0];
+axis2 = [-0.5; sqrt(3)/2; 0];
+axis3 = [-0.5; -sqrt(3)/2; 0];
+tau_leg1_on_body = -joint_torques(1) * axis1;
+tau_leg2_on_body = -joint_torques(2) * axis2;
+tau_leg3_on_body = -joint_torques(3) * axis3;
+tau_legs_total_body = tau_leg1_on_body + tau_leg2_on_body + tau_leg3_on_body;
+%     disp('+++');
+% disp(tau_legs_total_body);
+% disp('...');
+
+
+%% state update
+l_m=params.l; k_t=params.k_t;
+T1=motor_thrusts(1); T2=motor_thrusts(2); T3=motor_thrusts(3);
+
+L_prop = (T2-T3)*l_m*cosd(30);
+M_prop = (-T1 + (T2+T3)*sind(30))*l_m;
+N_prop = k_t*(T2 - T1 - T3);
+
+prop_force_world = [0; 0; sum(motor_thrusts)];
+
+dq = zeros(16,1);
+dq(1:3) = robot_vel;
+dq(4:6) = foot_force/params.m - [0;0;g] + prop_force_world/params.m;
+dq(7:9) = 0;
+dq(9) = (-foot_force(3)-kf*foot_pos(3))/bf;
+
+phi = q(10);
+theta = q(11);
+omega = q(13:15); % [p; q_body; r]
+W_inv = [ 1,  sin(phi)*tan(theta),  cos(phi)*tan(theta);
+    0,  cos(phi),            -sin(phi);
+    0,  sin(phi)/cos(theta),  cos(phi)/cos(theta) ];
+euler_rates = W_inv * omega;
+dq(10:12) = euler_rates;
+
+I = params.I_matrix;
+omega = q(13:15);
+tau_prop = [L_prop; M_prop; N_prop];
+tau_total_body = tau_prop + tau_legs_total_body;
+omega_dot = I \ (tau_total_body - cross(omega, I * omega));
+dq(13:15) = omega_dot;
+
+% dq(13) = -hip_torque(1);
+% dq(14) = -hip_torque(2);
+
+dq(16) = 0;
+end

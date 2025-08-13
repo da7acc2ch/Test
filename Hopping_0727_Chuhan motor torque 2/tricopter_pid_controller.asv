@@ -1,0 +1,61 @@
+% 文件: tricopter_pid_controller.m
+function [U, attitude_target] = tricopter_pid_controller(q, p_desired, h_desired, params, integral_e, dt)
+    % 最终修正版：集成位置、姿态和高度控制
+
+    % 状态解包
+    current_pos = q(1:3); 
+    body_vel = q(4:6);
+    current_rpy = q(10:12); 
+    current_pqr = q(13:15);
+    
+    % --- 外环: 位置控制 (计算期望姿态) ---
+    target_pos_full = [p_desired(1); p_desired(2); h_desired];
+    e_pos = target_pos_full - current_pos;
+    
+    % 根据位置误差计算期望的倾斜角度 (这是您修正后的正确逻辑)
+    % X方向误差 -> 负的俯仰角 (Pitch)
+    theta_d = -params.Kp_pos * e_pos(1) + params.Kd_pos * body_vel(1));
+    % Y方向误差 -> 正的横滚角 (Roll)
+    phi_d   =  (params.Kp_pos * e_pos(2) - params.Kd_pos * body_vel(2));
+    
+    % 限制最大倾斜角
+    max_tilt = 20 * pi/180;
+    phi_d = max(-max_tilt, min(max_tilt, phi_d));
+    theta_d = max(-max_tilt, min(max_tilt, theta_d));
+    
+    % 期望的姿态和高度
+    attitude_target = [phi_d; theta_d; 0; h_desired];
+
+    % --- 内环: 姿态和高度控制 ---
+    % 姿态误差
+    e_phi = attitude_target(1) - current_rpy(1);
+    e_theta = attitude_target(2) - current_rpy(2);
+    e_psi = wrapToPi(attitude_target(3) - current_rpy(3));
+    
+    % 高度误差
+    e_z = attitude_target(4) - current_pos(3);
+
+    % 更新积分项 (必须在这里更新，而不是在ODE函数里)
+    integral_e.phi = integral_e.phi + e_phi * dt;
+    integral_e.theta = integral_e.theta + e_theta * dt;
+    integral_e.psi = integral_e.psi + e_psi * dt;
+    integral_e.z = integral_e.z + e_z * dt;
+
+    % 积分抗饱和
+    integral_e.phi   = max(-params.integral_max, min(params.integral_max, integral_e.phi));
+    integral_e.theta = max(-params.integral_max, min(params.integral_max, integral_e.theta));
+    integral_e.psi   = max(-params.integral_max, min(params.integral_max, integral_e.psi));
+    integral_e.z     = max(-params.integral_max, min(params.integral_max, integral_e.z));
+
+    % PD控制器计算期望的力矩
+    torque_L = params.Kp_att * e_phi   + params.Ki_att * integral_e.phi   - params.Kd_att * current_pqr(1);
+    torque_M = (params.Kp_att * e_theta + params.Ki_att * integral_e.theta - params.Kd_att * current_pqr(2));
+    torque_N = params.Kp_yaw * e_psi   + params.Ki_yaw * integral_e.psi   - params.Kd_yaw * current_pqr(3);
+
+    % PID控制器计算期望的总推力 (包括重力补偿)
+    gravity_compensation = (params.m * params.g) / (cos(current_rpy(1)) * cos(current_rpy(2)));
+    force_Fz = params.Kp_alt * e_z + params.Ki_alt * integral_e.z - params.Kd_alt * body_vel(3) + gravity_compensation;
+
+    % 输出总控制指令
+    U = [force_Fz; torque_L; torque_M; torque_N];
+end
